@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+from tensorboardX import SummaryWriter
 
 import numpy as np
 import scipy.io
@@ -13,9 +14,11 @@ from sppnet import SPPNet
 image_path = './data/jpg'
 label_path = './data/imagelabels.mat'
 setid_path = './data/setid.mat'
+save_path = './data/model_single.pth'
 BATCH = 1
 EPOCH = 20
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+writer = SummaryWriter('./log_single')
 
 
 class MyDataset(Dataset):
@@ -37,11 +40,11 @@ class MyDataset(Dataset):
         labels = scipy.io.loadmat(label_path)['labels'][0]
         if train:
             trnid = setid['tstid'][0]
-            self.labels = torch.tensor([labels[i - 1] for i in trnid], dtype=torch.int64)
+            self.labels = [labels[i - 1] - 1 for i in trnid]
             self.images = ['%s/image_%05d.jpg' % (image_path, i) for i in trnid]
         else:
             tstid = np.append(setid['valid'][0], setid['trnid'][0])
-            self.labels = torch.tensor([labels[i - 1] for i in tstid], dtype=torch.int64)
+            self.labels = [labels[i - 1] - 1 for i in tstid]
             self.images = ['%s/image_%05d.jpg' % (image_path, i) for i in tstid]
         self.transform = transform
 
@@ -58,6 +61,7 @@ class MyDataset(Dataset):
 
 def train(model, device, train_loader, criterion, optimizer, epoch):
     model.train()
+    train_loss = 0
     for batch_idx, (image, label) in enumerate(train_loader):
         image, label = image.to(device), label.to(device)
 
@@ -67,45 +71,66 @@ def train(model, device, train_loader, criterion, optimizer, epoch):
         loss.backward()
         optimizer.step()
 
-        if (batch_idx + 1) % 10 == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.4f}'.format(
+        train_loss += loss.item()
+        if (batch_idx + 1) % 200 == 0:
+            train_loss /= 200
+
+            print('Train Epoch: %d [%d/%d (%.4f%%)]\tLoss: %.4f' % (
                 epoch, (batch_idx + 1) * len(image), len(train_loader.dataset),
-                       (batch_idx + 1) * len(image) / len(train_loader.dataset) * 100., loss.item()))
+                100. * (batch_idx + 1) * len(image) / len(train_loader.dataset), train_loss))
+            train_loss = 0
 
 
-def test(model, device, test_loader, criterion):
+def test(model, device, test_loader, criterion, epoch):
     model.eval()
-    test_loss = 0
-    correct = 0
+    total_true = 0
+    total_loss = 0
     with torch.no_grad():
         for image, label in test_loader:
             image, label = image.to(device), label.to(device)
 
             output = model(image)
-            test_loss += criterion(output, label, reduction='sum').item()  # sum up batch loss
-            pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
-            correct += pred.eq(label.view_as(pred)).sum().item()
+            loss = criterion(output, label)
 
-    test_loss /= len(test_loader.dataset)
-    print('Test set: Accuracy: [{}/{} ({:.0f}%)]\tAverage loss: {:.4f},'.format(
-        correct, len(test_loader.dataset), correct / len(test_loader.dataset) * 100., test_loss))
+            pred = torch.max(output, 1)[1]  # get the index of the max log-probability
+            total_true += (pred.view(label.size()).data == label.data).sum().item()
+            total_loss += loss.item()
+
+    accuracy = total_true / len(test_loader.dataset)
+    loss = total_loss / len(test_loader.dataset)
+    print('\nTest Epoch: %d ====> Accuracy: [%d/%d (%.4f%%)]\tAverage loss: %.4f\n' % (
+        epoch, total_true, len(test_loader.dataset), 100. * accuracy, loss))
+    writer.add_scalar('accuracy', accuracy, epoch)
+    writer.add_scalar('loss', loss, epoch)
+    writer.add_image('image', image.cpu(), epoch)
 
 
 if __name__ == '__main__':
     train_dataset = MyDataset(image_path, label_path, setid_path,
-                              train=True, transform=transforms.ToTensor())
+                              train=True, transform=
+                              transforms.Compose([
+                                  transforms.RandomHorizontalFlip(),
+                                  transforms.RandomRotation(30),
+                                  transforms.ToTensor(),
+                                  transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]))
+
     train_loader = DataLoader(train_dataset, batch_size=BATCH, shuffle=True)
     print('Train size:', len(train_loader))
 
     test_dataset = MyDataset(image_path, label_path, setid_path,
-                             train=False, transform=transforms.ToTensor())
-    test_loader = DataLoader(test_dataset, batch_size=BATCH, shuffle=True)
+                             train=False, transform=
+                             transforms.Compose([
+                                 transforms.ToTensor(),
+                                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]))
+    test_loader = DataLoader(test_dataset, batch_size=BATCH, shuffle=False)
     print('Test size:', len(test_loader))
 
     model = SPPNet().to(device)
-    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.99))
     criterion = nn.CrossEntropyLoss()
 
     for epoch in range(1, EPOCH + 1):
         train(model, device, train_loader, criterion, optimizer, epoch)
-        test(model, device, test_loader, criterion)
+        test(model, device, test_loader, criterion, epoch)
+
+    torch.save(model, save_path)

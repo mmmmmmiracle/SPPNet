@@ -37,7 +37,7 @@ class SPPNet(nn.Module):
     A CNN model which adds spp layer so that we can input single-size tensor
     """
 
-    def __init__(self, n_classes=102):
+    def __init__(self, n_classes=102, init_weights=True):
         super(SPPNet, self).__init__()
         """
         'wc1',[3,96,11,11]
@@ -66,6 +66,9 @@ class SPPNet(nn.Module):
 
         self.out = nn.Linear(4096, n_classes)
 
+        if init_weights:
+            self._initialize_weights()
+
     def forward(self, x):
         # torch.Size([N, C, H, W])
         # print(x.size())
@@ -82,10 +85,20 @@ class SPPNet(nn.Module):
         x = F.relu(self.conv4(x))
         x = F.relu(self.conv5(x))
 
-        spp = spatial_pyramid_pool(x, 1, [int(x.size(2)), int(x.size(3))], self.output_num)
+        spp = spatial_pyramid_pool(x, x.size(0), [int(x.size(2)), int(x.size(3))], self.output_num)
 
         fc1 = F.relu(self.fc1(spp))
         fc2 = F.relu(self.fc2(fc1))
 
         output = self.out(fc2)
         return output
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
